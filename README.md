@@ -23,7 +23,7 @@ A Neovim plugin for launching and managing project shell commands from a per-pro
 
 ```lua
 {
-  "yourusername/nvimlaunch",
+  "hadishahpuri/nvimlaunch",
   keys = {
     { "<leader>l", "<cmd>NvimLaunch<cr>", desc = "NvimLaunch" },
   },
@@ -34,7 +34,7 @@ If you want to pass options (for future configuration):
 
 ```lua
 {
-  "yourusername/nvimlaunch",
+  "hadishahpuri/nvimlaunch",
   opts = {},
   keys = {
     { "<leader>l", "<cmd>NvimLaunch<cr>", desc = "NvimLaunch" },
@@ -45,7 +45,7 @@ If you want to pass options (for future configuration):
 ### packer.nvim
 
 ```lua
-use "yourusername/nvimlaunch"
+use "hadishahpuri/nvimlaunch"
 ```
 
 Then call setup manually somewhere in your config:
