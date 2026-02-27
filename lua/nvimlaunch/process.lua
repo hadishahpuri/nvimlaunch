@@ -4,6 +4,10 @@ local M = {}
 --- [name] = { job_id, cmd, status, output_buf, started_at, exit_code }
 M.jobs = {}
 
+--- Maximum lines kept per output buffer. Oldest lines are dropped when exceeded.
+--- Override via require("nvimlaunch").setup({ max_lines = N }).
+M.max_lines = 5000
+
 --- Append lines to a buffer from a job callback (thread-safe via vim.schedule)
 local function buf_append(buf, lines)
   if not vim.api.nvim_buf_is_valid(buf) then return end
@@ -20,11 +24,18 @@ local function buf_append(buf, lines)
     if not vim.api.nvim_buf_is_valid(buf) then return end
     vim.bo[buf].modifiable = true
     vim.api.nvim_buf_set_lines(buf, -1, -1, false, to_add)
+
+    -- Drop oldest lines when the buffer grows past the limit
+    local lc = vim.api.nvim_buf_line_count(buf)
+    if lc > M.max_lines then
+      vim.api.nvim_buf_set_lines(buf, 0, lc - M.max_lines, false, {})
+      lc = M.max_lines
+    end
+
     vim.bo[buf].modifiable = false
     -- Auto-scroll every window that is showing this buffer
     for _, win in ipairs(vim.api.nvim_list_wins()) do
       if vim.api.nvim_win_get_buf(win) == buf then
-        local lc = vim.api.nvim_buf_line_count(buf)
         pcall(vim.api.nvim_win_set_cursor, win, { lc, 0 })
       end
     end

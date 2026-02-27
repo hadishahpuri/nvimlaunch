@@ -7,7 +7,7 @@ A Neovim plugin for launching and managing project shell commands from a per-pro
 - Reads commands from a `.nvimlaunch` JSON file in your project root
 - Groups commands by label for easy organisation
 - Shows live status: `RUNNING`, `STOPPED`, `EXITED`, `FAILED`
-- Per-command output buffer with auto-scroll
+- Per-command output buffer with auto-scroll and automatic line-limit trimming
 - Start, stop, and restart commands from the panel
 - Reload config without restarting Neovim
 - Status refreshes every 500 ms automatically
@@ -30,12 +30,14 @@ A Neovim plugin for launching and managing project shell commands from a per-pro
 },
 ```
 
-If you want to pass options (for future configuration):
+To customise options:
 
 ```lua
 {
   "hadishahpuri/nvimlaunch",
-  opts = {},
+  opts = {
+    max_lines = 5000, -- max lines kept per output buffer (default: 5000)
+  },
   keys = {
     { "<leader>l", "<cmd>NvimLaunch<cr>", desc = "NvimLaunch" },
   },
@@ -128,6 +130,8 @@ project/
 ```
 
 Each command runs as a background job via Neovim's `jobstart`. Its stdout and stderr are streamed into a dedicated buffer that persists for the lifetime of the Neovim session. Restarting a command appends a separator to the existing buffer rather than clearing it, so you keep the full history.
+
+Output buffers are capped at `max_lines` (default 5000). When the limit is reached, the oldest lines are automatically dropped so memory use stays bounded even for commands that produce continuous output.
 
 The panel floats in the centre of the screen and polls job status every 500 ms:
 

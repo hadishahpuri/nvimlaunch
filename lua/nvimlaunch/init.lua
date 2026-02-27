@@ -14,6 +14,10 @@ function M.setup(opts)
   _initialized = true
   opts = opts or {}
 
+  if opts.max_lines then
+    process.max_lines = opts.max_lines
+  end
+
   ui.setup_highlights()
 
   -- Re-apply highlights whenever the colorscheme changes
