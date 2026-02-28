@@ -2,6 +2,8 @@
 
 A Neovim plugin for launching and managing project shell commands from a per-project `.nvimlaunch` config file. Run long-lived processes (dev servers, build watchers, test runners), view their live output, and stop or restart them — all without leaving your editor.
 
+![demo](demo.gif)
+
 ## Features
 
 - Reads commands from a `.nvimlaunch` JSON file in your project root
