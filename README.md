@@ -164,3 +164,7 @@ vim.api.nvim_create_autocmd("VimLeavePre", {
   end,
 })
 ```
+
+## License
+
+MIT
