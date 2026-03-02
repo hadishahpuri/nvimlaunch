@@ -89,7 +89,9 @@ function M.start(name, cmd)
       vim.schedule(function()
         local job = M.jobs[name]
         if job then
-          job.status    = (code == 0) and "exited" or "failed"
+          if job.status ~= "stopped" then
+            job.status = (code == 0) and "exited" or "failed"
+          end
           job.exit_code = code
         end
         if vim.api.nvim_buf_is_valid(buf) then
