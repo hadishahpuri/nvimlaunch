@@ -1,9 +1,45 @@
 local M = {}
 
---- Load and parse .nvimlaunch from cwd
+--- Walk up from dir looking for .nvimlaunch; returns its full path or nil.
+---@param dir string
+---@return string|nil
+local function find_root(dir)
+  local sep = package.config:sub(1, 1)
+  local d = dir
+  while true do
+    local candidate = d .. sep .. ".nvimlaunch"
+    if vim.fn.filereadable(candidate) == 1 then
+      return candidate
+    end
+    local parent = vim.fn.fnamemodify(d, ":h")
+    if parent == d then return nil end  -- reached filesystem root
+    d = parent
+  end
+end
+
+--- Load and parse .nvimlaunch, searching upward from the current buffer's
+--- directory (falls back to cwd when the buffer has no file path).
 ---@return table|nil data, string|nil err
 function M.load()
-  local path = vim.fn.getcwd() .. "/.nvimlaunch"
+  local buf_file = vim.api.nvim_buf_get_name(0)
+  local start_dir
+  if buf_file ~= "" and vim.fn.filereadable(buf_file) == 1 then
+    start_dir = vim.fn.fnamemodify(buf_file, ":p:h")
+  else
+    start_dir = vim.fn.getcwd()
+  end
+
+  local found = find_root(start_dir)
+  if not found then
+    -- also try cwd in case the buffer dir search missed it
+    found = find_root(vim.fn.getcwd())
+  end
+
+  if not found then
+    return nil, "No .nvimlaunch file found (searched from " .. start_dir .. ")"
+  end
+
+  local path = found
   local f = io.open(path, "r")
   if not f then
     return nil, "No .nvimlaunch file found in " .. vim.fn.getcwd()
