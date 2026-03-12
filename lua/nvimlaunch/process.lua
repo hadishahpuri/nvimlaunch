@@ -81,10 +81,8 @@ function M.start(name, cmd)
   end
 
   local job_id = vim.fn.jobstart({ "bash", "-c", cmd }, {
-    stdout_buffered = false,
-    stderr_buffered = false,
+    pty = true,
     on_stdout = function(_, data) buf_append(buf, data) end,
-    on_stderr = function(_, data) buf_append(buf, data) end,
     on_exit = function(_, code)
       vim.schedule(function()
         local job = M.jobs[name]
