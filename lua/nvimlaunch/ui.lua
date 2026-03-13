@@ -9,7 +9,26 @@ local S = {
   commands   = {},   -- list of command objects from config
   line_map   = {},   -- [row_0idx] = cmd_index (1-based into S.commands)
   cmd_rows   = {},   -- sorted list of 0-indexed rows that hold a command
+  group_map  = {},   -- [row_0idx] = group_name (for command rows)
+  group_header_rows = {},  -- [row_0idx] = group_name (for header rows)
 }
+
+-- ──────────────────────────────── keymaps ──────────────────────────────────────
+local _keymaps = {
+  run_restart  = "<cr>",
+  stop         = "s",
+  output       = "o",
+  start_all    = "a",
+  start_group  = "g",
+  reload       = "r",
+  close        = { "q", "<Esc>" },
+  output_close = "q",
+  output_clear = "c",
+}
+
+function M.set_keymaps(km)
+  _keymaps = vim.tbl_deep_extend("force", _keymaps, km or {})
+end
 
 -- ──────────────────────────────── constants ──────────────────────────────────
 local NS = vim.api.nvim_create_namespace("nvimlaunch")
@@ -38,13 +57,40 @@ local HL = {
   border  = "NvimLaunchBorder",
 }
 
+-- ──────────────────────────────── helpers ───────────────────────────────────
+
+--- Format a duration in seconds to a human-readable string.
+local function format_uptime(secs)
+  secs = math.max(0, math.floor(secs))
+  if secs < 60 then return secs .. "s" end
+  if secs < 3600 then
+    return math.floor(secs / 60) .. "m" .. (secs % 60) .. "s"
+  end
+  return math.floor(secs / 3600) .. "h" .. math.floor((secs % 3600) / 60) .. "m"
+end
+
+--- Determine the group the cursor is currently in.
+local function current_group()
+  if not S.panel_win or not vim.api.nvim_win_is_valid(S.panel_win) then return nil end
+  local row = vim.api.nvim_win_get_cursor(S.panel_win)[1] - 1
+  if S.group_map[row] then return S.group_map[row] end
+  if S.group_header_rows[row] then return S.group_header_rows[row] end
+  for r = row - 1, 0, -1 do
+    if S.group_header_rows[r] then return S.group_header_rows[r] end
+  end
+  return nil
+end
+
 -- ──────────────────────────────── line building ───────────────────────────────
---- Build display lines and rebuild S.line_map / S.cmd_rows
+
+--- Build display lines and rebuild S.line_map / S.cmd_rows / S.group_map
 ---@return string[] lines
 local function build_lines()
   local lines    = {}
   local line_map = {}
   local cmd_rows = {}
+  local group_map = {}
+  local group_header_rows = {}
 
   -- Group commands; a command listed under multiple groups appears multiple times
   local groups      = {}
@@ -61,18 +107,35 @@ local function build_lines()
 
   table.insert(lines, "")  -- top padding
 
+  local INFO_W = 9  -- fixed width for info column (uptime / exit code)
+
   for _, grp in ipairs(group_order) do
+    local header_row = #lines  -- 0-indexed
+    group_header_rows[header_row] = grp
     table.insert(lines, "  " .. grp)
+
     for _, idx in ipairs(groups[grp]) do
       local cmd  = S.commands[idx]
       local st   = process.status(cmd.name)
       local icon = ICON[st]  or "○"
       local stxt = STATUS_TEXT[st] or "STOPPED"
 
-      -- Fixed-width layout: indent + icon + name (left) + status badge (right)
+      -- Build info column (uptime or exit code)
+      local info = ""
+      local ji = process.job_info(cmd.name)
+      if st == "running" and ji then
+        info = format_uptime(os.time() - ji.started_at)
+      elseif (st == "failed" or st == "exited") and ji and ji.exit_code then
+        info = "exit(" .. ji.exit_code .. ")"
+      end
+      -- Right-align info in INFO_W chars
+      info = string.rep(" ", math.max(0, INFO_W - #info)) .. info
+
+      -- Fixed-width layout
       local prefix  = "    " .. icon .. "  "
-      local suffix  = "  [" .. stxt .. "]"
-      local name_w  = 56 - #prefix - #suffix
+      local suffix  = " " .. info .. "  [" .. stxt .. "]"
+      local total_w = 64
+      local name_w  = total_w - #prefix - #suffix
       local name    = cmd.name
       if #name > name_w then
         name = name:sub(1, name_w - 1) .. "…"
@@ -80,20 +143,28 @@ local function build_lines()
         name = name .. string.rep(" ", name_w - #name)
       end
 
-      local row = #lines  -- 0-indexed (lines is 1-indexed so #lines == next 0-idx)
+      local row = #lines  -- 0-indexed
       line_map[row] = idx
+      group_map[row] = grp
       table.insert(cmd_rows, row)
       table.insert(lines, prefix .. name .. suffix)
     end
     table.insert(lines, "")  -- blank between groups
   end
 
-  -- Footer hints
-  table.insert(lines,
-    "  <cr> Run/Restart  s Stop  o Output  r Reload  q Quit")
+  -- Footer hints (reflect configurable keymaps)
+  local km = _keymaps
+  local close_key = type(km.close) == "table" and km.close[1] or km.close
+  table.insert(lines, string.format(
+    "  %s Run  %s Stop  %s Out  %s All  %s Grp  %s Reload  %s Quit",
+    km.run_restart, km.stop, km.output, km.start_all, km.start_group,
+    km.reload, close_key
+  ))
 
   S.line_map = line_map
   S.cmd_rows = cmd_rows
+  S.group_map = group_map
+  S.group_header_rows = group_header_rows
   return lines
 end
 
@@ -121,12 +192,12 @@ local function apply_hl(lines)
   end
 
   -- Group headers and footer
-  for row0, line in ipairs(lines) do
+  for row0, _ in ipairs(lines) do
     local r = row0 - 1
     if not S.line_map[r] then
-      if line:match("^  %S") and not line:match("<cr>") then
+      if S.group_header_rows[r] then
         vim.api.nvim_buf_add_highlight(S.panel_buf, NS, HL.header, r, 2, -1)
-      elseif line:match("<cr>") then
+      elseif lines[row0]:match("Quit") then
         vim.api.nvim_buf_add_highlight(S.panel_buf, NS, HL.hint, r, 0, -1)
       end
     end
@@ -211,7 +282,7 @@ function M.open(commands)
   end
   local content_h = 1 + ngroups * 1 + ncmds + ngroups + 1  -- pad+headers+cmds+blanks+footer
   local H = math.max(8, math.min(content_h + 2, vim.o.lines - 6))
-  local W = math.min(68, vim.o.columns - 4)
+  local W = math.min(72, vim.o.columns - 4)
   local row = math.floor((vim.o.lines - H) / 2)
   local col = math.floor((vim.o.columns - W) / 2)
 
@@ -241,19 +312,30 @@ function M.open(commands)
   end
 
   -- ── keymaps ──────────────────────────────────────────────────────────────
+  local function bind(key, fn)
+    if type(key) == "table" then
+      for _, k in ipairs(key) do
+        vim.keymap.set("n", k, fn, { buffer = buf, nowait = true, silent = true })
+      end
+    else
+      vim.keymap.set("n", key, fn, { buffer = buf, nowait = true, silent = true })
+    end
+  end
+
   local function map(key, fn)
     vim.keymap.set("n", key, fn, { buffer = buf, nowait = true, silent = true })
   end
 
-  map("<cr>", function()
+  bind(_keymaps.run_restart, function()
     local cmd = selected_cmd()
     if not cmd then return end
     local st = process.status(cmd.name)
+    local opts = { cwd = cmd.cwd, env = cmd.env }
     if st == "running" then
-      process.restart(cmd.name, cmd.cmd)
+      process.restart(cmd.name, cmd.cmd, opts)
       vim.notify("[NvimLaunch] Restarting: " .. cmd.name, vim.log.levels.INFO)
     else
-      local ok, err = process.start(cmd.name, cmd.cmd)
+      local ok, err = process.start(cmd.name, cmd.cmd, opts)
       if ok then
         vim.notify("[NvimLaunch] Started: " .. cmd.name, vim.log.levels.INFO)
       else
@@ -263,7 +345,7 @@ function M.open(commands)
     vim.defer_fn(M.refresh, 200)
   end)
 
-  map("s", function()
+  bind(_keymaps.stop, function()
     local cmd = selected_cmd()
     if not cmd then return end
     local ok, err = process.stop(cmd.name)
@@ -275,13 +357,13 @@ function M.open(commands)
     M.refresh()
   end)
 
-  map("o", function()
+  bind(_keymaps.output, function()
     local cmd = selected_cmd()
     if not cmd then return end
     M.open_output(cmd.name)
   end)
 
-  map("r", function()
+  bind(_keymaps.reload, function()
     local cfg = require("nvimlaunch.config")
     local data, err = cfg.load()
     if data then
@@ -293,32 +375,57 @@ function M.open(commands)
     end
   end)
 
+  bind(_keymaps.start_all, function()
+    for _, cmd in ipairs(S.commands) do
+      if process.status(cmd.name) ~= "running" then
+        process.start(cmd.name, cmd.cmd, { cwd = cmd.cwd, env = cmd.env })
+      end
+    end
+    vim.notify("[NvimLaunch] Started all commands", vim.log.levels.INFO)
+    vim.defer_fn(M.refresh, 200)
+  end)
+
+  bind(_keymaps.start_group, function()
+    local grp = current_group()
+    if not grp then return end
+    for _, cmd in ipairs(S.commands) do
+      for _, g in ipairs(cmd.groups) do
+        if g == grp and process.status(cmd.name) ~= "running" then
+          process.start(cmd.name, cmd.cmd, { cwd = cmd.cwd, env = cmd.env })
+          break
+        end
+      end
+    end
+    vim.notify("[NvimLaunch] Started group: " .. grp, vim.log.levels.INFO)
+    vim.defer_fn(M.refresh, 200)
+  end)
+
+  -- Navigation (not configurable — j/k/arrows are fundamental)
   map("j", function()
-    local row = vim.api.nvim_win_get_cursor(S.panel_win)[1] - 1
-    local nr  = next_cmd_row(row)
+    local r = vim.api.nvim_win_get_cursor(S.panel_win)[1] - 1
+    local nr = next_cmd_row(r)
     if nr then vim.api.nvim_win_set_cursor(S.panel_win, { nr + 1, 4 }) end
   end)
 
   map("k", function()
-    local row = vim.api.nvim_win_get_cursor(S.panel_win)[1] - 1
-    local pr  = prev_cmd_row(row)
+    local r = vim.api.nvim_win_get_cursor(S.panel_win)[1] - 1
+    local pr = prev_cmd_row(r)
     if pr then vim.api.nvim_win_set_cursor(S.panel_win, { pr + 1, 4 }) end
   end)
 
   map("<Down>", function()
-    local row = vim.api.nvim_win_get_cursor(S.panel_win)[1] - 1
-    local nr  = next_cmd_row(row)
+    local r = vim.api.nvim_win_get_cursor(S.panel_win)[1] - 1
+    local nr = next_cmd_row(r)
     if nr then vim.api.nvim_win_set_cursor(S.panel_win, { nr + 1, 4 }) end
   end)
 
   map("<Up>", function()
-    local row = vim.api.nvim_win_get_cursor(S.panel_win)[1] - 1
-    local pr  = prev_cmd_row(row)
+    local r = vim.api.nvim_win_get_cursor(S.panel_win)[1] - 1
+    local pr = prev_cmd_row(r)
     if pr then vim.api.nvim_win_set_cursor(S.panel_win, { pr + 1, 4 }) end
   end)
 
-  map("q",     M.close)
-  map("<Esc>", M.close)
+  bind(_keymaps.close, M.close)
 
   -- Track window close so state stays clean
   vim.api.nvim_create_autocmd("WinClosed", {
@@ -349,13 +456,8 @@ function M.open_output(name)
     return
   end
 
-  -- If the output window is already open, just switch its buffer
+  -- If the output window is already open, close it first
   if S.output_win and vim.api.nvim_win_is_valid(S.output_win) then
-    vim.api.nvim_win_set_buf(S.output_win, buf)
-    vim.api.nvim_set_current_win(S.output_win)
-    local lc = vim.api.nvim_buf_line_count(buf)
-    pcall(vim.api.nvim_win_set_cursor, S.output_win, { lc, 0 })
-    -- Update title (re-open with new name)
     vim.api.nvim_win_close(S.output_win, true)
     S.output_win = nil
   end
@@ -387,8 +489,8 @@ function M.open_output(name)
   local lc = vim.api.nvim_buf_line_count(buf)
   pcall(vim.api.nvim_win_set_cursor, win, { lc, 0 })
 
-  -- q to close output and return to panel
-  vim.keymap.set("n", "q", function()
+  -- Close output → return to panel
+  vim.keymap.set("n", _keymaps.output_close, function()
     if vim.api.nvim_win_is_valid(win) then
       vim.api.nvim_win_close(win, true)
       S.output_win = nil
@@ -398,13 +500,22 @@ function M.open_output(name)
     end
   end, { buffer = buf, nowait = true, silent = true })
 
+  -- Clear output buffer
+  vim.keymap.set("n", _keymaps.output_clear, function()
+    if vim.api.nvim_buf_is_valid(buf) then
+      vim.bo[buf].modifiable = true
+      vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "" })
+      vim.bo[buf].modifiable = false
+    end
+  end, { buffer = buf, nowait = true, silent = true })
+
   vim.api.nvim_create_autocmd("WinClosed", {
     pattern  = tostring(win),
     once     = true,
     callback = function()
       S.output_win = nil
-      -- Remove the keymap we added so it doesn't linger on the buffer
-      pcall(vim.keymap.del, "n", "q", { buffer = buf })
+      pcall(vim.keymap.del, "n", _keymaps.output_close, { buffer = buf })
+      pcall(vim.keymap.del, "n", _keymaps.output_clear, { buffer = buf })
     end,
   })
 end

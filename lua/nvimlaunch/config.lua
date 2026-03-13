@@ -57,6 +57,7 @@ function M.load()
   end
 
   -- Validate each command entry
+  local config_dir = vim.fn.fnamemodify(path, ":h")
   for i, cmd in ipairs(data.commands) do
     if type(cmd.name) ~= "string" or cmd.name == "" then
       return nil, string.format("commands[%d] missing 'name'", i)
@@ -68,8 +69,23 @@ function M.load()
     if type(cmd.groups) ~= "table" or #cmd.groups == 0 then
       cmd.groups = { "Default" }
     end
+    -- Normalise optional fields
+    cmd.auto_start = cmd.auto_start == true
+    if cmd.cwd and type(cmd.cwd) == "string" then
+      cmd.cwd = vim.fn.expand(cmd.cwd)
+      if not cmd.cwd:match("^/") then
+        cmd.cwd = config_dir .. "/" .. cmd.cwd
+      end
+      cmd.cwd = vim.fn.resolve(cmd.cwd)
+    else
+      cmd.cwd = nil
+    end
+    if type(cmd.env) ~= "table" then
+      cmd.env = nil
+    end
   end
 
+  data._config_dir = config_dir
   return data
 end
 
