@@ -51,7 +51,7 @@ function M.setup(opts)
   vim.api.nvim_create_autocmd("VimLeavePre", {
     group    = vim.api.nvim_create_augroup("NvimLaunchCleanup", { clear = true }),
     callback = function()
-      process.stop_all()
+      process.stop_all(true) -- synchronous: deferred timers don't fire during exit
     end,
   })
 
