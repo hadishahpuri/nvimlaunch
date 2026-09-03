@@ -1,12 +1,32 @@
+local ansi = require("nvimlaunch.ansi")
+
 local M = {}
 
 --- Active job state keyed by command name
---- [name] = { job_id, cmd, status, output_buf, started_at, exit_code, log_file }
+--- [name] = { job_id, cmd, status, output_buf, started_at, exit_code, log_file,
+---            parser, pending }
 M.jobs = {}
 
 --- Maximum lines kept per output buffer. Oldest lines are dropped when exceeded.
 --- Override via require("nvimlaunch").setup({ max_lines = N }).
 M.max_lines = 5000
+
+--- How to treat the terminal escape sequences a pty-attached command emits:
+---   "render" — strip them and reproduce colours as buffer highlights (default)
+---   "strip"  — strip them, no colours
+---   "raw"    — leave the bytes untouched (shows `^[[1m` noise)
+--- Override via require("nvimlaunch").setup({ ansi = "..." }).
+M.ansi = "render"
+
+--- Size reported to the pty. Commands like `cargo` and `pytest` lay their
+--- output out for this width, so the default tracks the output window rather
+--- than leaving everything wrapped at the 80x24 pty default.
+--- Override via require("nvimlaunch").setup({ pty_width = N, pty_height = N }).
+M.pty_width  = nil
+M.pty_height = nil
+
+--- Namespace for the highlights reproduced from ANSI colour codes.
+local NS = vim.api.nvim_create_namespace("nvimlaunch_output")
 
 --- Directory for log files (nil = logging disabled).
 --- Set via require("nvimlaunch").setup({ log_to_file = true }).
@@ -43,50 +63,85 @@ local function close_log_file(job)
   end
 end
 
---- Write lines to a job's log file.
-local function log_write(job, lines)
+--- Write one rendered line to a job's log file. Logs get the same escape-free
+--- text the buffer shows, so they stay greppable.
+local function log_write(job, line)
   if not job or not job.log_file then return end
-  for i, line in ipairs(lines) do
-    if not (i == #lines and line == "") then
-      job.log_file:write(line .. "\n")
-    end
-  end
+  job.log_file:write(line .. "\n")
   job.log_file:flush()
 end
 
 -- ──────────────────────────────── buffer helpers ──────────────────────────────
 
---- Append lines to a buffer from a job callback (thread-safe via vim.schedule)
-local function buf_append(buf, lines)
-  if not vim.api.nvim_buf_is_valid(buf) then return end
-  -- jobstart always sends a trailing "" — skip it
-  local to_add = {}
-  for i, line in ipairs(lines) do
-    if i < #lines or line ~= "" then
-      table.insert(to_add, line)
+--- Trim the buffer to max_lines and scroll every window showing it to the end.
+local function buf_tail(buf)
+  local lc = vim.api.nvim_buf_line_count(buf)
+  if lc > M.max_lines then
+    vim.api.nvim_buf_set_lines(buf, 0, lc - M.max_lines, false, {})
+    lc = M.max_lines
+  end
+  for _, win in ipairs(vim.api.nvim_list_wins()) do
+    if vim.api.nvim_win_get_buf(win) == buf then
+      pcall(vim.api.nvim_win_set_cursor, win, { lc, 0 })
     end
   end
-  if #to_add == 0 then return end
+end
 
+--- Append plain lines to a buffer (raw mode, and the plugin's own banners).
+local function buf_append(job, buf, lines)
+  if #lines == 0 then return end
   vim.schedule(function()
-    if not vim.api.nvim_buf_is_valid(buf) then return end
+    if job.detached or not vim.api.nvim_buf_is_valid(buf) then return end
     vim.bo[buf].modifiable = true
-    vim.api.nvim_buf_set_lines(buf, -1, -1, false, to_add)
-
-    -- Drop oldest lines when the buffer grows past the limit
-    local lc = vim.api.nvim_buf_line_count(buf)
-    if lc > M.max_lines then
-      vim.api.nvim_buf_set_lines(buf, 0, lc - M.max_lines, false, {})
-      lc = M.max_lines
-    end
-
+    vim.api.nvim_buf_set_lines(buf, -1, -1, false, lines)
+    job.pending = false
+    buf_tail(buf)
     vim.bo[buf].modifiable = false
-    -- Auto-scroll every window that is showing this buffer
-    for _, win in ipairs(vim.api.nvim_list_wins()) do
-      if vim.api.nvim_win_get_buf(win) == buf then
-        pcall(vim.api.nvim_win_set_cursor, win, { lc, 0 })
+  end)
+end
+
+--- Write rendered records to a buffer.
+---
+--- The last record of a feed may be `incomplete` — a line the command is still
+--- writing (a progress bar being redrawn in place, say). It goes into the
+--- buffer so output stays live, and the next feed overwrites that same row
+--- instead of appending a duplicate.
+local function buf_write(job, buf, records)
+  if #records == 0 then return end
+  vim.schedule(function()
+    if job.detached or not vim.api.nvim_buf_is_valid(buf) then return end
+
+    local texts = {}
+    for i, rec in ipairs(records) do texts[i] = rec.text end
+
+    local lc = vim.api.nvim_buf_line_count(buf)
+    local start = (job.pending and lc > 0) and (lc - 1) or lc
+
+    vim.bo[buf].modifiable = true
+    -- Replacing a line leaves its extmarks behind as zero-width leftovers;
+    -- an in-place progress bar redraws often enough for those to pile up.
+    vim.api.nvim_buf_clear_namespace(buf, NS, start, -1)
+    vim.api.nvim_buf_set_lines(buf, start, -1, false, texts)
+
+    if M.ansi == "render" then
+      for i, rec in ipairs(records) do
+        local row = start + i - 1
+        for _, span in ipairs(rec.spans) do
+          local group = ansi.hl_group(span[3])
+          if group then
+            pcall(vim.api.nvim_buf_set_extmark, buf, NS, row, span[1], {
+              end_col  = span[2],
+              hl_group = group,
+              strict   = false,
+            })
+          end
+        end
       end
     end
+
+    job.pending = records[#records].incomplete
+    buf_tail(buf)
+    vim.bo[buf].modifiable = false
   end)
 end
 
@@ -259,7 +314,10 @@ function M.start(name, cmd, opts)
   local existing = M.jobs[name]
   local buf
 
+  -- Detach the previous run so its in-flight scheduled writes can't land on
+  -- top of the restart banner (or of the new run's output).
   if existing then
+    existing.detached = true
     close_log_file(existing)
   end
 
@@ -286,37 +344,80 @@ function M.start(name, cmd, opts)
     log_file:flush()
   end
 
+  -- Built before jobstart so the callbacks close over *this* run's state
+  -- rather than looking up M.jobs[name], which a restart may already have
+  -- replaced by the time a late chunk arrives.
+  local job = {
+    cmd        = cmd,
+    status     = "running",
+    output_buf = buf,
+    started_at = os.time(),
+    log_file   = log_file,
+    parser     = ansi.new(),
+    pending    = false,
+  }
+
+  --- Render a chunk of pty output into buffer lines + highlights, and log the
+  --- lines that are now complete.
+  local function consume(text)
+    local records = job.parser:feed(text)
+    for _, rec in ipairs(records) do
+      if not rec.incomplete then log_write(job, rec.text) end
+    end
+    buf_write(job, buf, records)
+  end
+
   local job_opts = {
     pty = true,
+    -- 0.86 matches the output float's width; -4 leaves room for its 'number'
+    -- column so long lines land inside the window instead of scrolling off.
+    width  = M.pty_width  or math.max(80, math.floor(vim.o.columns * 0.86) - 4),
+    height = M.pty_height or math.max(24, math.floor(vim.o.lines * 0.80) - 2),
     on_stdout = function(_, data)
-      buf_append(buf, data)
-      log_write(M.jobs[name], data)
+      if M.ansi == "raw" then
+        -- jobstart always sends a trailing "" — drop it
+        local lines = {}
+        for i, line in ipairs(data) do
+          if i < #data or line ~= "" then table.insert(lines, line) end
+        end
+        buf_append(job, buf, lines)
+        for _, line in ipairs(lines) do log_write(job, line) end
+        return
+      end
+      -- `data` is the stream split on \n, so joining it back is lossless; the
+      -- parser owns line splitting because it must also honour CR and
+      -- erase-line, and must carry escapes split across chunk boundaries.
+      consume(table.concat(data, "\n"))
     end,
     on_exit = function(_, code)
       vim.schedule(function()
-        local job = M.jobs[name]
-        if job then
-          if job.status ~= "stopped" then
-            job.status = (code == 0) and "exited" or "failed"
-          end
-          job.exit_code = code
-          close_log_file(job)
-          -- Notify on unexpected failure
-          if code ~= 0 and job.status == "failed" then
-            vim.notify(
-              "[NvimLaunch] " .. name .. " failed (exit " .. code .. ")",
-              vim.log.levels.ERROR
-            )
+        if job.status ~= "stopped" then
+          job.status = (code == 0) and "exited" or "failed"
+        end
+        job.exit_code = code
+
+        -- Flush a final line the command wrote without a trailing newline.
+        if M.ansi ~= "raw" then
+          local rec = job.parser:finish()
+          if rec then
+            log_write(job, rec.text)
+            buf_write(job, buf, { rec })
           end
         end
-        if vim.api.nvim_buf_is_valid(buf) then
-          vim.bo[buf].modifiable = true
-          vim.api.nvim_buf_set_lines(buf, -1, -1, false, {
-            "",
-            "└─ Exited with code " .. code .. " at " .. os.date("%H:%M:%S"),
-          })
-          vim.bo[buf].modifiable = false
+        close_log_file(job)
+
+        -- Notify on unexpected failure
+        if code ~= 0 and job.status == "failed" then
+          vim.notify(
+            "[NvimLaunch] " .. name .. " failed (exit " .. code .. ")",
+            vim.log.levels.ERROR
+          )
         end
+
+        buf_append(job, buf, {
+          "",
+          "└─ Exited with code " .. code .. " at " .. os.date("%H:%M:%S"),
+        })
       end)
     end,
   }
@@ -328,17 +429,13 @@ function M.start(name, cmd, opts)
 
   if job_id <= 0 then
     if log_file then log_file:close() end
+    -- Nothing replaced the previous run, so let it keep writing.
+    if existing then existing.detached = nil end
     return false, "Failed to start process (jobstart returned " .. job_id .. ")"
   end
 
-  M.jobs[name] = {
-    job_id     = job_id,
-    cmd        = cmd,
-    status     = "running",
-    output_buf = buf,
-    started_at = os.time(),
-    log_file   = log_file,
-  }
+  job.job_id = job_id
+  M.jobs[name] = job
 
   return true
 end
@@ -391,6 +488,18 @@ function M.job_info(name)
     started_at = job.started_at,
     exit_code  = job.exit_code,
   }
+end
+
+--- Empty a command's output buffer, dropping the ANSI highlights with it.
+function M.clear_output(name)
+  local job = M.jobs[name]
+  if not job or not vim.api.nvim_buf_is_valid(job.output_buf) then return end
+  local buf = job.output_buf
+  vim.api.nvim_buf_clear_namespace(buf, NS, 0, -1)
+  vim.bo[buf].modifiable = true
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, {})
+  vim.bo[buf].modifiable = false
+  job.pending = false
 end
 
 --- Return the output buffer for a command, or nil if none exists yet.

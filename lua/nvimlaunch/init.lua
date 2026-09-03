@@ -19,8 +19,12 @@ local DEFAULT_KEYMAPS = {
   output_clear = "c",
 }
 
+local ANSI_MODES = { render = true, strip = true, raw = true }
+
 --- Plugin setup — safe to call multiple times; only initializes once.
----@param opts? { max_lines?: number, log_to_file?: boolean, log_dir?: string, keymaps?: table }
+---@param opts? { max_lines?: number, ansi?: "render"|"strip"|"raw",
+--- pty_width?: number, pty_height?: number, log_to_file?: boolean,
+--- log_dir?: string, keymaps?: table }
 function M.setup(opts)
   if _initialized then return end
   _initialized = true
@@ -29,6 +33,22 @@ function M.setup(opts)
   if opts.max_lines then
     process.max_lines = opts.max_lines
   end
+
+  -- Terminal escape sequences in command output
+  if opts.ansi ~= nil then
+    if ANSI_MODES[opts.ansi] then
+      process.ansi = opts.ansi
+    else
+      vim.notify(
+        "[NvimLaunch] invalid ansi mode '" .. tostring(opts.ansi)
+          .. "' (expected \"render\", \"strip\" or \"raw\")",
+        vim.log.levels.WARN
+      )
+    end
+  end
+
+  if opts.pty_width  then process.pty_width  = opts.pty_width  end
+  if opts.pty_height then process.pty_height = opts.pty_height end
 
   -- Logging
   if opts.log_to_file then

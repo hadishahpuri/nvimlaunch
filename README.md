@@ -10,6 +10,8 @@ A Neovim plugin for launching and managing project shell commands from a per-pro
 - Groups commands by label for easy organisation
 - Shows live status: `RUNNING`, `STOPPED`, `EXITED`, `FAILED`
 - Per-command output buffer with auto-scroll and automatic line-limit trimming
+- ANSI colour output rendered as real highlights — no `^[[1m` escape noise
+- In-place progress bars (cargo, pytest, npm) redraw on one line instead of spamming
 - Start, stop, and restart individual commands, entire groups, or all at once
 - Auto-start commands when the panel opens
 - Per-command working directory and environment variables
@@ -45,8 +47,9 @@ To customise options:
 {
   "hadishahpuri/nvimlaunch",
   opts = {
-    max_lines    = 5000,  -- max lines kept per output buffer (default: 5000)
-    log_to_file  = true,  -- write output to .nvimlaunch-logs/ (default: false)
+    max_lines    = 5000,      -- max lines kept per output buffer (default: 5000)
+    ansi         = "render",  -- "render" | "strip" | "raw" (default: "render")
+    log_to_file  = true,      -- write output to .nvimlaunch-logs/ (default: false)
     keymaps = {           -- override any default keymap (optional)
       stop = "x",
     },
@@ -122,9 +125,33 @@ A command listed under multiple groups appears under each group in the panel.
 | Option        | Type      | Default               | Description                                      |
 |---------------|-----------|-----------------------|--------------------------------------------------|
 | `max_lines`   | `number`  | `5000`                | Max lines kept per output buffer                 |
+| `ansi`        | `string`  | `"render"`            | How to handle terminal escape sequences — see [ANSI output](#ansi-output) |
+| `pty_width`   | `number`  | auto                  | Column count reported to the pty (default: tracks the output window) |
+| `pty_height`  | `number`  | auto                  | Row count reported to the pty                    |
 | `log_to_file` | `boolean` | `false`               | Write all output to `.nvimlaunch-logs/` directory |
 | `log_dir`     | `string`  | `.nvimlaunch-logs/`   | Custom log directory (when `log_to_file` is true) |
 | `keymaps`     | `table`   | see below             | Override default keybindings                     |
+
+### ANSI output
+
+Commands run on a pty so they stream output live and stay in line-buffered mode.
+The trade-off is that they emit real terminal escape sequences: SGR colour codes,
+carriage returns for in-place progress bars, and erase-line codes.
+
+nvimlaunch interprets those sequences instead of showing them literally:
+
+| `ansi`     | Behaviour                                                                    |
+|------------|------------------------------------------------------------------------------|
+| `"render"` | **Default.** Escapes are consumed; colours become buffer highlights, and a progress bar redraws on one line |
+| `"strip"`  | Escapes are consumed, colours discarded — plain monochrome text               |
+| `"raw"`    | Escapes are left in the buffer as literal `^[[1m` text                        |
+
+Colours follow your colorscheme's `g:terminal_color_0..15` palette where it sets
+one, and 256-colour and 24-bit truecolour sequences are supported. File logs
+always get the escape-free text, whatever the mode.
+
+If a command lays its output out too narrow or too wide, set `pty_width` — that
+is the terminal width tools like `cargo` and `pytest` format against.
 
 ### Keymap defaults
 
@@ -182,11 +209,13 @@ project/
 └── .nvimlaunch-logs/     ← output logs (when log_to_file is enabled)
 ```
 
-Each command runs as a background job via Neovim's `jobstart`. Its stdout and stderr are streamed into a dedicated buffer that persists for the lifetime of the Neovim session. Restarting a command appends a separator to the existing buffer rather than clearing it, so you keep the full history.
+Each command runs as a background job via Neovim's `jobstart`, attached to a pty so tools keep colour on and flush output line by line instead of switching to block buffering. Its stdout and stderr are streamed into a dedicated buffer that persists for the lifetime of the Neovim session. Restarting a command appends a separator to the existing buffer rather than clearing it, so you keep the full history.
+
+Incoming bytes pass through a small single-line terminal emulator that resolves SGR colours into buffer highlights and honours carriage returns, backspace, tabs, and erase-line — so a progress bar that repaints itself occupies one line, exactly as it would in your terminal. See [ANSI output](#ansi-output).
 
 Output buffers are capped at `max_lines` (default 5000). When the limit is reached, the oldest lines are automatically dropped so memory use stays bounded even for commands that produce continuous output.
 
-When `log_to_file` is enabled, all output is also written to `.nvimlaunch-logs/<command-name>.log` next to your `.nvimlaunch` config file, so you can review logs after restarting Neovim.
+When `log_to_file` is enabled, all output is also written to `.nvimlaunch-logs/<command-name>.log` next to your `.nvimlaunch` config file, so you can review logs after restarting Neovim. Log files get the same escape-free text the buffer shows, so they stay greppable.
 
 The panel floats in the centre of the screen and polls job status every 500 ms. Running commands show their uptime, and failed commands show their exit code:
 

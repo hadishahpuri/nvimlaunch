@@ -502,11 +502,7 @@ function M.open_output(name)
 
   -- Clear output buffer
   vim.keymap.set("n", _keymaps.output_clear, function()
-    if vim.api.nvim_buf_is_valid(buf) then
-      vim.bo[buf].modifiable = true
-      vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "" })
-      vim.bo[buf].modifiable = false
-    end
+    process.clear_output(name)
   end, { buffer = buf, nowait = true, silent = true })
 
   vim.api.nvim_create_autocmd("WinClosed", {
@@ -522,6 +518,10 @@ end
 
 -- ──────────────────────────────── colour setup ────────────────────────────────
 function M.setup_highlights()
+  -- `:colorscheme` runs `:hi clear`, which also wipes the groups generated for
+  -- ANSI output colours while extmarks still point at them.
+  require("nvimlaunch.ansi").reapply()
+
   local set = function(name, opts) vim.api.nvim_set_hl(0, name, opts) end
   set(HL.running, { fg = "#4ade80", bold = true })
   set(HL.stopped, { fg = "#6b7280" })
